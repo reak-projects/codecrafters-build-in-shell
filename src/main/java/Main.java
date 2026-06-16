@@ -440,9 +440,19 @@ public class Main {
             prevStdout = isLast ? null : p.getInputStream();
         }
 
-        // Wait for all processes to finish
-        for (Process p : processes) {
-            p.waitFor();
+        // Wait for the last process to finish, then kill any upstream processes
+        // that are still running (e.g. `tail -f | head -n 5`: head exits first,
+        // tail -f would hang forever without this).
+        if (!processes.isEmpty()) {
+            Process last = processes.get(processes.size() - 1);
+            last.waitFor();
+            for (int pi = 0; pi < processes.size() - 1; pi++) {
+                Process p = processes.get(pi);
+                if (p.isAlive()) {
+                    p.destroy();
+                    p.waitFor();
+                }
+            }
         }
     }
 
