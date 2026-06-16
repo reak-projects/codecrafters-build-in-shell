@@ -342,7 +342,11 @@ public class Main {
                         if (isLast) {
                             out = (fStdoutFile != null) ? getOutStream(fStdoutFile, fAppendStdout) : System.out;
                         } else {
-                            out = new PrintStream(pipedOut);
+                            // autoFlush=true so println() flushes immediately into the pipe.
+                            // Without this, output sits in PrintStream's internal buffer until
+                            // close(), which means a slow/long-lived downstream consumer never
+                            // sees it in time.
+                            out = new PrintStream(pipedOut, true);
                         }
                         switch (fcmd) {
                             case "echo" -> out.println(String.join(" ", fargs));
@@ -419,13 +423,23 @@ public class Main {
             Process p = pb.start();
             processes.add(p);
 
-            // Feed previous process's stdout into this process's stdin
+            // Feed previous process's stdout into this process's stdin.
+            // IMPORTANT: must flush after every chunk, not rely on close()-time
+            // flushing. transferTo() alone will buffer data indefinitely if the
+            // upstream producer (e.g. `tail -f`) never reaches EOF, so a downstream
+            // consumer (e.g. `head -n 5`) would see nothing until upstream closes,
+            // which for a long-lived process is never.
             if (prevStdout != null) {
                 final InputStream src = prevStdout;
                 final OutputStream dst = p.getOutputStream();
                 Thread feeder = new Thread(() -> {
                     try {
-                        src.transferTo(dst);
+                        byte[] buf = new byte[8192];
+                        int len;
+                        while ((len = src.read(buf)) != -1) {
+                            dst.write(buf, 0, len);
+                            dst.flush();
+                        }
                     } catch (IOException e) {
                         // broken pipe is normal at end of pipeline
                     } finally {
