@@ -152,10 +152,14 @@ public class Main {
             case "jobs" -> {
                 ensureFileCreated(stderrFile, appendStderr);
                 PrintStream out = getOutStream(stdoutFile, appendStdout);
-                for (JobEntry job : jobs.values()) {
-                    if (!job.done) {
-                        out.println("[" + job.id + "] Running " + job.command);
-                    }
+                List<JobEntry> activeJobs = jobs.values().stream()
+                    .filter(j -> !j.done)
+                    .collect(java.util.stream.Collectors.toList());
+                for (int ji = 0; ji < activeJobs.size(); ji++) {
+                    JobEntry job = activeJobs.get(ji);
+                    char flag = (ji == activeJobs.size() - 1) ? '+' :
+                                (ji == activeJobs.size() - 2) ? '-' : ' ';
+                    out.printf("[%d]%c  %-24s%s &%n", job.id, flag, "Running", job.command);
                 }
                 if (stdoutFile != null) out.close();
                 return;
