@@ -14,12 +14,58 @@ public class Main {
             String line = scanner.nextLine().trim();
             if (line.isEmpty()) continue;
 
-            List<String> tokens = tokenize(line);
-            if (tokens.isEmpty()) continue;
+            executeCommand(line);
+        }
+    }
 
-            String cmd = tokens.get(0);
-            List<String> cmdArgs = tokens.subList(1, tokens.size());
+    static void executeCommand(String line) throws Exception {
+        // Parse redirection
+        String stdoutFile = null;
+        String stderrFile = null;
+        boolean appendStdout = false;
+        boolean appendStderr = false;
 
+        // Find redirection operators
+        List<String> tokens = tokenize(line);
+        List<String> cmdTokens = new ArrayList<>();
+        
+        for (int i = 0; i < tokens.size(); i++) {
+            String t = tokens.get(i);
+            if ((t.equals(">") || t.equals("1>")) && i + 1 < tokens.size()) {
+                stdoutFile = tokens.get(++i);
+            } else if ((t.equals(">>") || t.equals("1>>")) && i + 1 < tokens.size()) {
+                stdoutFile = tokens.get(++i);
+                appendStdout = true;
+            } else if (t.equals("2>") && i + 1 < tokens.size()) {
+                stderrFile = tokens.get(++i);
+            } else if (t.equals("2>>") && i + 1 < tokens.size()) {
+                stderrFile = tokens.get(++i);
+                appendStderr = true;
+            } else {
+                cmdTokens.add(t);
+            }
+        }
+
+        if (cmdTokens.isEmpty()) return;
+        String cmd = cmdTokens.get(0);
+        List<String> cmdArgs = cmdTokens.subList(1, cmdTokens.size());
+
+        // Setup output streams
+        PrintStream savedOut = System.out;
+        PrintStream savedErr = System.err;
+
+        if (stdoutFile != null) {
+            File f = new File(stdoutFile);
+            f.getParentFile().mkdirs();
+            System.setOut(new PrintStream(new FileOutputStream(f, appendStdout)));
+        }
+        if (stderrFile != null) {
+            File f = new File(stderrFile);
+            f.getParentFile().mkdirs();
+            System.setErr(new PrintStream(new FileOutputStream(f, appendStderr)));
+        }
+
+        try {
             switch (cmd) {
                 case "exit" -> {
                     int code = cmdArgs.isEmpty() ? 0 : Integer.parseInt(cmdArgs.get(0));
@@ -46,18 +92,19 @@ public class Main {
                     System.out.println(System.getProperty("user.dir"));
                 }
                 case "cd" -> {
-                    String dir = cmdArgs.isEmpty() ? System.getProperty("user.home") : cmdArgs.get(0);
+                    String dir = cmdArgs.isEmpty() ? System.getenv("HOME") : cmdArgs.get(0);
+                    if (dir == null) dir = System.getProperty("user.home");
                     if (dir.equals("~")) {
-    dir = System.getenv("HOME");
-    if (dir == null) dir = System.getProperty("user.home");
-}
+                        dir = System.getenv("HOME");
+                        if (dir == null) dir = System.getProperty("user.home");
+                    }
                     File f = new File(dir);
                     if (!f.isAbsolute()) f = new File(System.getProperty("user.dir"), dir);
                     f = f.getCanonicalFile();
                     if (f.isDirectory()) {
                         System.setProperty("user.dir", f.getPath());
                     } else {
-                        System.out.println("cd: " + dir + ": No such file or directory");
+                        System.err.println("cd: " + dir + ": No such file or directory");
                     }
                 }
                 default -> {
@@ -68,15 +115,47 @@ public class Main {
                         command.addAll(cmdArgs);
                         ProcessBuilder pb = new ProcessBuilder(command);
                         pb.directory(new File(System.getProperty("user.dir")));
-                        pb.inheritIO();
-                        Map<String, String> env = pb.environment();
-                        env.put("PATH", System.getenv("PATH"));
+                        pb.environment().put("PATH", System.getenv("PATH"));
+
+                        // Handle stdout redirection for external commands
+                        if (stdoutFile != null) {
+                            File f = new File(stdoutFile);
+                            f.getParentFile().mkdirs();
+                            pb.redirectOutput(appendStdout ?
+                                ProcessBuilder.Redirect.appendTo(f) :
+                                ProcessBuilder.Redirect.to(f));
+                        } else {
+                            pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+                        }
+
+                        if (stderrFile != null) {
+                            File f = new File(stderrFile);
+                            f.getParentFile().mkdirs();
+                            pb.redirectError(appendStderr ?
+                                ProcessBuilder.Redirect.appendTo(f) :
+                                ProcessBuilder.Redirect.to(f));
+                        } else {
+                            pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+                        }
+
+                        pb.redirectInput(ProcessBuilder.Redirect.INHERIT);
                         Process p = pb.start();
                         p.waitFor();
                     } else {
-                        System.out.println(cmd + ": command not found");
+                        System.err.println(cmd + ": command not found");
                     }
                 }
+            }
+        } finally {
+            System.out.flush();
+            System.err.flush();
+            if (stdoutFile != null) {
+                System.out.close();
+                System.setOut(savedOut);
+            }
+            if (stderrFile != null) {
+                System.err.close();
+                System.setErr(savedErr);
             }
         }
     }
