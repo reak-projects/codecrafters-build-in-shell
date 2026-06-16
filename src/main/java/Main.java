@@ -152,15 +152,23 @@ public class Main {
             case "jobs" -> {
                 ensureFileCreated(stderrFile, appendStderr);
                 PrintStream out = getOutStream(stdoutFile, appendStdout);
-                // Update done status before listing
-                List<Integer> toRemoveAfter = new ArrayList<>();
+                // Update done status before listing; use waitFor with timeout to catch
+                // processes that finished moments ago but isAlive() hasn't caught up yet
                 for (JobEntry job : jobs.values()) {
-                    if (!job.done && !job.process.isAlive()) {
-                        job.done = true;
-                        job.exitCode = job.process.exitValue();
+                    if (!job.done) {
+                        try {
+                            boolean exited = job.process.waitFor(50, TimeUnit.MILLISECONDS);
+                            if (exited || !job.process.isAlive()) {
+                                job.done = true;
+                                job.exitCode = job.process.exitValue();
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
                     }
                 }
                 List<JobEntry> allJobs = new ArrayList<>(jobs.values());
+                List<Integer> toRemoveAfter = new ArrayList<>();
                 for (int ji = 0; ji < allJobs.size(); ji++) {
                     JobEntry job = allJobs.get(ji);
                     char flag = (ji == allJobs.size() - 1) ? '+' :
