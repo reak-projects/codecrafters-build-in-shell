@@ -27,7 +27,7 @@ public class Main {
         Scanner scanner = new Scanner(System.in);
 
         while (true) {
-            reapJobs(); // reap before prompt
+            reapJobs();
             System.out.print("$ ");
             System.out.flush();
 
@@ -52,6 +52,44 @@ public class Main {
         for (int id : toRemove) jobs.remove(id);
     }
 
+    // Split a raw line on pipe characters that are NOT inside quotes or escaped
+    static List<String> splitOnPipes(String line) {
+        List<String> segments = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        int i = 0;
+        while (i < line.length()) {
+            char c = line.charAt(i);
+            if (c == '\'') {
+                current.append(c); i++;
+                while (i < line.length() && line.charAt(i) != '\'') {
+                    current.append(line.charAt(i++));
+                }
+                if (i < line.length()) { current.append(line.charAt(i)); i++; }
+            } else if (c == '"') {
+                current.append(c); i++;
+                while (i < line.length() && line.charAt(i) != '"') {
+                    if (line.charAt(i) == '\\' && i + 1 < line.length()) {
+                        current.append(line.charAt(i)); current.append(line.charAt(i + 1)); i += 2;
+                    } else {
+                        current.append(line.charAt(i++));
+                    }
+                }
+                if (i < line.length()) { current.append(line.charAt(i)); i++; }
+            } else if (c == '\\') {
+                if (i + 1 < line.length()) { current.append(c); current.append(line.charAt(i + 1)); i += 2; }
+                else i++;
+            } else if (c == '|') {
+                segments.add(current.toString().trim());
+                current.setLength(0);
+                i++;
+            } else {
+                current.append(c); i++;
+            }
+        }
+        segments.add(current.toString().trim());
+        return segments;
+    }
+
     static void executeCommand(String line) throws Exception {
         boolean background = false;
         if (line.endsWith("&")) {
@@ -59,7 +97,13 @@ public class Main {
             line = line.substring(0, line.length() - 1).trim();
         }
 
-        // Parse redirection
+        List<String> segments = splitOnPipes(line);
+        if (segments.size() > 1) {
+            executePipeline(segments, background);
+            return;
+        }
+
+        // Single command path
         String stdoutFile = null;
         String stderrFile = null;
         boolean appendStdout = false;
@@ -89,7 +133,6 @@ public class Main {
         String cmd = cmdTokens.get(0);
         List<String> cmdArgs = cmdTokens.subList(1, cmdTokens.size());
 
-        // Builtins don't run in background
         switch (cmd) {
             case "exit" -> {
                 int code = cmdArgs.isEmpty() ? 0 : Integer.parseInt(cmdArgs.get(0));
@@ -150,8 +193,6 @@ public class Main {
             case "jobs" -> {
                 ensureFileCreated(stderrFile, appendStderr);
                 PrintStream out = getOutStream(stdoutFile, appendStdout);
-                // Update done status before listing; use waitFor with timeout to catch
-                // processes that finished moments ago but isAlive() hasn't caught up yet
                 for (JobEntry job : jobs.values()) {
                     if (!job.done) {
                         try {
@@ -199,10 +240,8 @@ public class Main {
         pb.environment().put("PATH", System.getenv("PATH"));
 
         if (background) {
-            // Background: capture output, print later
             pb.redirectErrorStream(false);
             Process p = pb.start();
-            // Find lowest available job ID
             int jobId = 1;
             while (jobs.containsKey(jobId)) jobId++;
             String jobCmd = cmd + (cmdArgs.isEmpty() ? "" : " " + String.join(" ", cmdArgs));
@@ -210,7 +249,6 @@ public class Main {
             jobs.put(jobId, entry);
             System.out.println("[" + jobId + "] " + p.pid());
 
-            // Stream output in background thread
             Thread outThread = new Thread(() -> {
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
                     String outputLine;
@@ -222,7 +260,6 @@ public class Main {
             outThread.setDaemon(true);
             outThread.start();
         } else {
-            // Foreground
             if (stdoutFile != null) {
                 File f = new File(stdoutFile);
                 if (f.getParentFile() != null) f.getParentFile().mkdirs();
@@ -243,6 +280,172 @@ public class Main {
         }
     }
 
+    /**
+     * Execute a pipeline: cmd1 | cmd2 | ... | cmdN
+     * Chains stdout of each process into stdin of the next.
+     */
+    static void executePipeline(List<String> segments, boolean background) throws Exception {
+        int n = segments.size();
+        List<Process> processes = new ArrayList<>();
+
+        String stdoutFile = null;
+        String stderrFile = null;
+        boolean appendStdout = false;
+        boolean appendStderr = false;
+
+        // Parse each segment's tokens (redirections only honoured on last segment)
+        List<List<String>> cmdList = new ArrayList<>();
+        for (int si = 0; si < n; si++) {
+            List<String> tokens = tokenize(segments.get(si));
+            List<String> cmdTokens = new ArrayList<>();
+            for (int i = 0; i < tokens.size(); i++) {
+                String t = tokens.get(i);
+                if ((t.equals(">") || t.equals("1>")) && i + 1 < tokens.size()) {
+                    stdoutFile = tokens.get(++i);
+                } else if ((t.equals(">>") || t.equals("1>>")) && i + 1 < tokens.size()) {
+                    stdoutFile = tokens.get(++i); appendStdout = true;
+                } else if (t.equals("2>") && i + 1 < tokens.size()) {
+                    stderrFile = tokens.get(++i);
+                } else if (t.equals("2>>") && i + 1 < tokens.size()) {
+                    stderrFile = tokens.get(++i); appendStderr = true;
+                } else {
+                    cmdTokens.add(t);
+                }
+            }
+            cmdList.add(cmdTokens);
+        }
+
+        InputStream prevStdout = null;
+
+        for (int si = 0; si < n; si++) {
+            List<String> cmdTokens = cmdList.get(si);
+            if (cmdTokens.isEmpty()) continue;
+
+            String cmd = cmdTokens.get(0);
+            List<String> cmdArgs = cmdTokens.subList(1, cmdTokens.size());
+            boolean isLast = (si == n - 1);
+
+            // Handle builtins in the pipeline via a thread + PipedStream
+            if (isBuiltin(cmd)) {
+                PipedOutputStream pipedOut = isLast ? null : new PipedOutputStream();
+                PipedInputStream pipedIn = pipedOut != null ? new PipedInputStream(pipedOut) : null;
+
+                final InputStream feedIn = prevStdout;
+                final String fcmd = cmd;
+                final List<String> fargs = new ArrayList<>(cmdArgs);
+                final String fStdoutFile = isLast ? stdoutFile : null;
+                final boolean fAppendStdout = appendStdout;
+
+                Thread t = new Thread(() -> {
+                    try {
+                        PrintStream out;
+                        if (isLast) {
+                            out = (fStdoutFile != null) ? getOutStream(fStdoutFile, fAppendStdout) : System.out;
+                        } else {
+                            out = new PrintStream(pipedOut);
+                        }
+                        switch (fcmd) {
+                            case "echo" -> out.println(String.join(" ", fargs));
+                            case "pwd"  -> out.println(System.getProperty("user.dir"));
+                            case "type" -> {
+                                if (!fargs.isEmpty()) {
+                                    String target = fargs.get(0);
+                                    if (isBuiltin(target)) out.println(target + " is a shell builtin");
+                                    else {
+                                        String p2 = findInPath(target);
+                                        out.println(p2 != null ? target + " is " + p2 : target + ": not found");
+                                    }
+                                }
+                            }
+                        }
+                        if (isLast && fStdoutFile != null) out.close();
+                        if (!isLast) pipedOut.close();
+                    } catch (IOException e) {}
+                });
+                t.setDaemon(true);
+                t.start();
+
+                if (!isLast) {
+                    prevStdout = pipedIn;
+                } else {
+                    t.join();
+                }
+                continue;
+            }
+
+            String execPath = findInPath(cmd);
+            if (execPath == null) {
+                System.err.println(cmd + ": command not found");
+                if (prevStdout != null) prevStdout.close();
+                return;
+            }
+
+            List<String> command = new ArrayList<>();
+            command.add(cmd);
+            command.addAll(cmdArgs);
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.directory(new File(System.getProperty("user.dir")));
+            pb.environment().put("PATH", System.getenv("PATH"));
+
+            // stdin
+            if (prevStdout != null) {
+                pb.redirectInput(ProcessBuilder.Redirect.PIPE);
+            } else {
+                pb.redirectInput(ProcessBuilder.Redirect.INHERIT);
+            }
+
+            // stdout
+            if (!isLast) {
+                pb.redirectOutput(ProcessBuilder.Redirect.PIPE);
+            } else {
+                if (stdoutFile != null) {
+                    File f = new File(stdoutFile);
+                    if (f.getParentFile() != null) f.getParentFile().mkdirs();
+                    pb.redirectOutput(appendStdout ? ProcessBuilder.Redirect.appendTo(f) : ProcessBuilder.Redirect.to(f));
+                } else {
+                    pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+                }
+            }
+
+            // stderr
+            if (isLast && stderrFile != null) {
+                File f = new File(stderrFile);
+                if (f.getParentFile() != null) f.getParentFile().mkdirs();
+                pb.redirectError(appendStderr ? ProcessBuilder.Redirect.appendTo(f) : ProcessBuilder.Redirect.to(f));
+            } else {
+                pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+            }
+
+            Process p = pb.start();
+            processes.add(p);
+
+            // Feed previous process's stdout into this process's stdin
+            if (prevStdout != null) {
+                final InputStream src = prevStdout;
+                final OutputStream dst = p.getOutputStream();
+                Thread feeder = new Thread(() -> {
+                    try {
+                        src.transferTo(dst);
+                    } catch (IOException e) {
+                        // broken pipe is normal at end of pipeline
+                    } finally {
+                        try { dst.close(); } catch (IOException e) {}
+                        try { src.close(); } catch (IOException e) {}
+                    }
+                });
+                feeder.setDaemon(true);
+                feeder.start();
+            }
+
+            prevStdout = isLast ? null : p.getInputStream();
+        }
+
+        // Wait for all processes to finish
+        for (Process p : processes) {
+            p.waitFor();
+        }
+    }
+
     static PrintStream getOutStream(String file, boolean append) throws IOException {
         if (file == null) return System.out;
         File f = new File(file);
@@ -254,7 +457,6 @@ public class Main {
         if (file == null) return;
         File f = new File(file);
         if (f.getParentFile() != null) f.getParentFile().mkdirs();
-        // In truncate mode always touch it; in append mode only create if missing
         if (!append || !f.exists()) {
             new FileOutputStream(f, append).close();
         }
