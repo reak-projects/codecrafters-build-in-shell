@@ -64,6 +64,7 @@ public class Main {
                         command.add(execPath);
                         command.addAll(cmdArgs);
                         ProcessBuilder pb = new ProcessBuilder(command);
+			pb.command().set(0, execPath);
                         pb.directory(new File(System.getProperty("user.dir")));
                         pb.inheritIO();
                         Process p = pb.start();
