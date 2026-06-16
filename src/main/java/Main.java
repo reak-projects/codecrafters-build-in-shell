@@ -47,7 +47,10 @@ public class Main {
                 }
                 case "cd" -> {
                     String dir = cmdArgs.isEmpty() ? System.getProperty("user.home") : cmdArgs.get(0);
-                    if (dir.equals("~")) dir = System.getProperty("user.home");
+                    if (dir.equals("~")) {
+    dir = System.getenv("HOME");
+    if (dir == null) dir = System.getProperty("user.home");
+}
                     File f = new File(dir);
                     if (!f.isAbsolute()) f = new File(System.getProperty("user.dir"), dir);
                     f = f.getCanonicalFile();
