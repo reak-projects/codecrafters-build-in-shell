@@ -50,8 +50,6 @@ public class Main {
             }
         }
         for (int id : toRemove) jobs.remove(id);
-        // Recycle job numbers
-        if (jobs.isEmpty()) nextJobId.set(1);
     }
 
     static void executeCommand(String line) throws Exception {
@@ -181,7 +179,6 @@ public class Main {
                     }
                 }
                 for (int id : toRemoveAfter) jobs.remove(id);
-                if (jobs.isEmpty()) nextJobId.set(1);
                 if (stdoutFile != null) out.close();
                 return;
             }
@@ -205,7 +202,9 @@ public class Main {
             // Background: capture output, print later
             pb.redirectErrorStream(false);
             Process p = pb.start();
-            int jobId = nextJobId.getAndIncrement();
+            // Find lowest available job ID
+            int jobId = 1;
+            while (jobs.containsKey(jobId)) jobId++;
             String jobCmd = cmd + (cmdArgs.isEmpty() ? "" : " " + String.join(" ", cmdArgs));
             JobEntry entry = new JobEntry(jobId, p, jobCmd);
             jobs.put(jobId, entry);
