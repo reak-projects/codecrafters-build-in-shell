@@ -61,12 +61,13 @@ public class Main {
                     String execPath = findInPath(cmd);
                     if (execPath != null) {
                         List<String> command = new ArrayList<>();
-                        command.add(execPath);
+                        command.add(cmd);
                         command.addAll(cmdArgs);
                         ProcessBuilder pb = new ProcessBuilder(command);
-			pb.command().set(0, execPath);
                         pb.directory(new File(System.getProperty("user.dir")));
                         pb.inheritIO();
+                        Map<String, String> env = pb.environment();
+                        env.put("PATH", System.getenv("PATH"));
                         Process p = pb.start();
                         p.waitFor();
                     } else {
@@ -102,7 +103,7 @@ public class Main {
                 while (i < line.length() && line.charAt(i) != '\'') {
                     current.append(line.charAt(i++));
                 }
-                i++; // closing quote
+                i++;
             } else if (c == '"') {
                 i++;
                 while (i < line.length() && line.charAt(i) != '"') {
@@ -117,7 +118,7 @@ public class Main {
                         current.append(line.charAt(i++));
                     }
                 }
-                i++; // closing quote
+                i++;
             } else if (c == '\\') {
                 if (i + 1 < line.length()) { current.append(line.charAt(i + 1)); i += 2; }
                 else i++;
