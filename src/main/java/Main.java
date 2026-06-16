@@ -45,7 +45,7 @@ public class Main {
             if (!job.done && !job.process.isAlive()) {
                 job.done = true;
                 job.exitCode = job.process.exitValue();
-                System.out.println("[" + job.id + "] Done " + job.command);
+                System.out.printf("[%d]%c  %-21s%s%n", job.id, '+', "Done", job.command);
                 toRemove.add(job.id);
             }
         }
@@ -152,15 +152,28 @@ public class Main {
             case "jobs" -> {
                 ensureFileCreated(stderrFile, appendStderr);
                 PrintStream out = getOutStream(stdoutFile, appendStdout);
-                List<JobEntry> activeJobs = jobs.values().stream()
-                    .filter(j -> !j.done)
-                    .collect(java.util.stream.Collectors.toList());
-                for (int ji = 0; ji < activeJobs.size(); ji++) {
-                    JobEntry job = activeJobs.get(ji);
-                    char flag = (ji == activeJobs.size() - 1) ? '+' :
-                                (ji == activeJobs.size() - 2) ? '-' : ' ';
-                    out.printf("[%d]%c  %-24s%s &%n", job.id, flag, "Running", job.command);
+                // Update done status before listing
+                List<Integer> toRemoveAfter = new ArrayList<>();
+                for (JobEntry job : jobs.values()) {
+                    if (!job.done && !job.process.isAlive()) {
+                        job.done = true;
+                        job.exitCode = job.process.exitValue();
+                    }
                 }
+                List<JobEntry> allJobs = new ArrayList<>(jobs.values());
+                for (int ji = 0; ji < allJobs.size(); ji++) {
+                    JobEntry job = allJobs.get(ji);
+                    char flag = (ji == allJobs.size() - 1) ? '+' :
+                                (ji == allJobs.size() - 2) ? '-' : ' ';
+                    if (job.done) {
+                        out.printf("[%d]%c  %-21s%s%n", job.id, flag, "Done", job.command);
+                        toRemoveAfter.add(job.id);
+                    } else {
+                        out.printf("[%d]%c  %-24s%s &%n", job.id, flag, "Running", job.command);
+                    }
+                }
+                for (int id : toRemoveAfter) jobs.remove(id);
+                if (jobs.isEmpty()) nextJobId.set(1);
                 if (stdoutFile != null) out.close();
                 return;
             }
