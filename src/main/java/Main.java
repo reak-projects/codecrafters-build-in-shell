@@ -99,6 +99,7 @@ public class Main {
             }
             case "echo" -> {
                 PrintStream out = getOutStream(stdoutFile, appendStdout);
+                ensureFileCreated(stderrFile, appendStderr);
                 out.println(String.join(" ", cmdArgs));
                 if (stdoutFile != null) out.close();
                 return;
@@ -107,6 +108,7 @@ public class Main {
                 if (cmdArgs.isEmpty()) return;
                 String target = cmdArgs.get(0);
                 PrintStream out = getOutStream(stdoutFile, appendStdout);
+                ensureFileCreated(stderrFile, appendStderr);
                 if (isBuiltin(target)) {
                     out.println(target + " is a shell builtin");
                 } else {
@@ -122,11 +124,13 @@ public class Main {
             }
             case "pwd" -> {
                 PrintStream out = getOutStream(stdoutFile, appendStdout);
+                ensureFileCreated(stderrFile, appendStderr);
                 out.println(System.getProperty("user.dir"));
                 if (stdoutFile != null) out.close();
                 return;
             }
             case "cd" -> {
+                ensureFileCreated(stdoutFile, appendStdout);
                 String dir = cmdArgs.isEmpty() ? System.getenv("HOME") : cmdArgs.get(0);
                 if (dir == null) dir = System.getProperty("user.home");
                 if (dir.equals("~")) {
@@ -139,16 +143,21 @@ public class Main {
                 if (f.isDirectory()) {
                     System.setProperty("user.dir", f.getPath());
                 } else {
-                    System.err.println("cd: " + dir + ": No such file or directory");
+                    PrintStream err = getOutStream(stderrFile, appendStderr);
+                    err.println("cd: " + dir + ": No such file or directory");
+                    if (stderrFile != null) err.close();
                 }
                 return;
             }
             case "jobs" -> {
+                ensureFileCreated(stderrFile, appendStderr);
+                PrintStream out = getOutStream(stdoutFile, appendStdout);
                 for (JobEntry job : jobs.values()) {
                     if (!job.done) {
-                        System.out.println("[" + job.id + "] Running " + job.command);
+                        out.println("[" + job.id + "] Running " + job.command);
                     }
                 }
+                if (stdoutFile != null) out.close();
                 return;
             }
         }
@@ -215,6 +224,16 @@ public class Main {
         File f = new File(file);
         if (f.getParentFile() != null) f.getParentFile().mkdirs();
         return new PrintStream(new FileOutputStream(f, append));
+    }
+
+    static void ensureFileCreated(String file, boolean append) throws IOException {
+        if (file == null) return;
+        File f = new File(file);
+        if (f.getParentFile() != null) f.getParentFile().mkdirs();
+        // In truncate mode always touch it; in append mode only create if missing
+        if (!append || !f.exists()) {
+            new FileOutputStream(f, append).close();
+        }
     }
 
     static boolean isBuiltin(String cmd) {
