@@ -1,12 +1,33 @@
 import java.util.*;
 import java.io.*;
 import java.nio.file.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 
 public class Main {
+    // Job table
+    static final Map<Integer, JobEntry> jobs = new LinkedHashMap<>();
+    static final AtomicInteger nextJobId = new AtomicInteger(1);
+
+    static class JobEntry {
+        int id;
+        Process process;
+        String command;
+        boolean done = false;
+        int exitCode = -1;
+
+        JobEntry(int id, Process process, String command) {
+            this.id = id;
+            this.process = process;
+            this.command = command;
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         Scanner scanner = new Scanner(System.in);
 
         while (true) {
+            reapJobs(); // reap before prompt
             System.out.print("$ ");
             System.out.flush();
 
@@ -18,17 +39,37 @@ public class Main {
         }
     }
 
+    static void reapJobs() {
+        List<Integer> toRemove = new ArrayList<>();
+        for (JobEntry job : jobs.values()) {
+            if (!job.done && !job.process.isAlive()) {
+                job.done = true;
+                job.exitCode = job.process.exitValue();
+                System.out.println("[" + job.id + "] Done " + job.command);
+                toRemove.add(job.id);
+            }
+        }
+        for (int id : toRemove) jobs.remove(id);
+        // Recycle job numbers
+        if (jobs.isEmpty()) nextJobId.set(1);
+    }
+
     static void executeCommand(String line) throws Exception {
+        boolean background = false;
+        if (line.endsWith("&")) {
+            background = true;
+            line = line.substring(0, line.length() - 1).trim();
+        }
+
         // Parse redirection
         String stdoutFile = null;
         String stderrFile = null;
         boolean appendStdout = false;
         boolean appendStderr = false;
 
-        // Find redirection operators
         List<String> tokens = tokenize(line);
         List<String> cmdTokens = new ArrayList<>();
-        
+
         for (int i = 0; i < tokens.size(); i++) {
             String t = tokens.get(i);
             if ((t.equals(">") || t.equals("1>")) && i + 1 < tokens.size()) {
@@ -50,118 +91,134 @@ public class Main {
         String cmd = cmdTokens.get(0);
         List<String> cmdArgs = cmdTokens.subList(1, cmdTokens.size());
 
-        // Setup output streams
-        PrintStream savedOut = System.out;
-        PrintStream savedErr = System.err;
-
-        if (stdoutFile != null) {
-            File f = new File(stdoutFile);
-            f.getParentFile().mkdirs();
-            System.setOut(new PrintStream(new FileOutputStream(f, appendStdout)));
-        }
-        if (stderrFile != null) {
-            File f = new File(stderrFile);
-            f.getParentFile().mkdirs();
-            System.setErr(new PrintStream(new FileOutputStream(f, appendStderr)));
-        }
-
-        try {
-            switch (cmd) {
-                case "exit" -> {
-                    int code = cmdArgs.isEmpty() ? 0 : Integer.parseInt(cmdArgs.get(0));
-                    System.exit(code);
-                }
-                case "echo" -> {
-                    System.out.println(String.join(" ", cmdArgs));
-                }
-                case "type" -> {
-                    if (cmdArgs.isEmpty()) break;
-                    String target = cmdArgs.get(0);
-                    if (isBuiltin(target)) {
-                        System.out.println(target + " is a shell builtin");
-                    } else {
-                        String path = findInPath(target);
-                        if (path != null) {
-                            System.out.println(target + " is " + path);
-                        } else {
-                            System.out.println(target + ": not found");
-                        }
-                    }
-                }
-                case "pwd" -> {
-                    System.out.println(System.getProperty("user.dir"));
-                }
-                case "cd" -> {
-                    String dir = cmdArgs.isEmpty() ? System.getenv("HOME") : cmdArgs.get(0);
-                    if (dir == null) dir = System.getProperty("user.home");
-                    if (dir.equals("~")) {
-                        dir = System.getenv("HOME");
-                        if (dir == null) dir = System.getProperty("user.home");
-                    }
-                    File f = new File(dir);
-                    if (!f.isAbsolute()) f = new File(System.getProperty("user.dir"), dir);
-                    f = f.getCanonicalFile();
-                    if (f.isDirectory()) {
-                        System.setProperty("user.dir", f.getPath());
-                    } else {
-                        System.err.println("cd: " + dir + ": No such file or directory");
-                    }
-                }
-                default -> {
-                    String execPath = findInPath(cmd);
-                    if (execPath != null) {
-                        List<String> command = new ArrayList<>();
-                        command.add(cmd);
-                        command.addAll(cmdArgs);
-                        ProcessBuilder pb = new ProcessBuilder(command);
-                        pb.directory(new File(System.getProperty("user.dir")));
-                        pb.environment().put("PATH", System.getenv("PATH"));
-
-                        // Handle stdout redirection for external commands
-                        if (stdoutFile != null) {
-                            File f = new File(stdoutFile);
-                            f.getParentFile().mkdirs();
-                            pb.redirectOutput(appendStdout ?
-                                ProcessBuilder.Redirect.appendTo(f) :
-                                ProcessBuilder.Redirect.to(f));
-                        } else {
-                            pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
-                        }
-
-                        if (stderrFile != null) {
-                            File f = new File(stderrFile);
-                            f.getParentFile().mkdirs();
-                            pb.redirectError(appendStderr ?
-                                ProcessBuilder.Redirect.appendTo(f) :
-                                ProcessBuilder.Redirect.to(f));
-                        } else {
-                            pb.redirectError(ProcessBuilder.Redirect.INHERIT);
-                        }
-
-                        pb.redirectInput(ProcessBuilder.Redirect.INHERIT);
-                        Process p = pb.start();
-                        p.waitFor();
-                    } else {
-                        System.err.println(cmd + ": command not found");
-                    }
-                }
+        // Builtins don't run in background
+        switch (cmd) {
+            case "exit" -> {
+                int code = cmdArgs.isEmpty() ? 0 : Integer.parseInt(cmdArgs.get(0));
+                System.exit(code);
             }
-        } finally {
-            System.out.flush();
-            System.err.flush();
+            case "echo" -> {
+                PrintStream out = getOutStream(stdoutFile, appendStdout);
+                out.println(String.join(" ", cmdArgs));
+                if (stdoutFile != null) out.close();
+                return;
+            }
+            case "type" -> {
+                if (cmdArgs.isEmpty()) return;
+                String target = cmdArgs.get(0);
+                PrintStream out = getOutStream(stdoutFile, appendStdout);
+                if (isBuiltin(target)) {
+                    out.println(target + " is a shell builtin");
+                } else {
+                    String path = findInPath(target);
+                    if (path != null) {
+                        out.println(target + " is " + path);
+                    } else {
+                        out.println(target + ": not found");
+                    }
+                }
+                if (stdoutFile != null) out.close();
+                return;
+            }
+            case "pwd" -> {
+                PrintStream out = getOutStream(stdoutFile, appendStdout);
+                out.println(System.getProperty("user.dir"));
+                if (stdoutFile != null) out.close();
+                return;
+            }
+            case "cd" -> {
+                String dir = cmdArgs.isEmpty() ? System.getenv("HOME") : cmdArgs.get(0);
+                if (dir == null) dir = System.getProperty("user.home");
+                if (dir.equals("~")) {
+                    dir = System.getenv("HOME");
+                    if (dir == null) dir = System.getProperty("user.home");
+                }
+                File f = new File(dir);
+                if (!f.isAbsolute()) f = new File(System.getProperty("user.dir"), dir);
+                f = f.getCanonicalFile();
+                if (f.isDirectory()) {
+                    System.setProperty("user.dir", f.getPath());
+                } else {
+                    System.err.println("cd: " + dir + ": No such file or directory");
+                }
+                return;
+            }
+            case "jobs" -> {
+                for (JobEntry job : jobs.values()) {
+                    if (!job.done) {
+                        System.out.println("[" + job.id + "] Running " + job.command);
+                    }
+                }
+                return;
+            }
+        }
+
+        // External command
+        String execPath = findInPath(cmd);
+        if (execPath == null) {
+            System.err.println(cmd + ": command not found");
+            return;
+        }
+
+        List<String> command = new ArrayList<>();
+        command.add(cmd);
+        command.addAll(cmdArgs);
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.directory(new File(System.getProperty("user.dir")));
+        pb.environment().put("PATH", System.getenv("PATH"));
+
+        if (background) {
+            // Background: capture output, print later
+            pb.redirectErrorStream(false);
+            Process p = pb.start();
+            int jobId = nextJobId.getAndIncrement();
+            String jobCmd = cmd + (cmdArgs.isEmpty() ? "" : " " + String.join(" ", cmdArgs));
+            JobEntry entry = new JobEntry(jobId, p, jobCmd);
+            jobs.put(jobId, entry);
+            System.out.println("[" + jobId + "] " + p.pid());
+
+            // Stream output in background thread
+            Thread outThread = new Thread(() -> {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                    String outputLine;
+                    while ((outputLine = reader.readLine()) != null) {
+                        System.out.println(outputLine);
+                    }
+                } catch (IOException e) {}
+            });
+            outThread.setDaemon(true);
+            outThread.start();
+        } else {
+            // Foreground
             if (stdoutFile != null) {
-                System.out.close();
-                System.setOut(savedOut);
+                File f = new File(stdoutFile);
+                if (f.getParentFile() != null) f.getParentFile().mkdirs();
+                pb.redirectOutput(appendStdout ? ProcessBuilder.Redirect.appendTo(f) : ProcessBuilder.Redirect.to(f));
+            } else {
+                pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
             }
             if (stderrFile != null) {
-                System.err.close();
-                System.setErr(savedErr);
+                File f = new File(stderrFile);
+                if (f.getParentFile() != null) f.getParentFile().mkdirs();
+                pb.redirectError(appendStderr ? ProcessBuilder.Redirect.appendTo(f) : ProcessBuilder.Redirect.to(f));
+            } else {
+                pb.redirectError(ProcessBuilder.Redirect.INHERIT);
             }
+            pb.redirectInput(ProcessBuilder.Redirect.INHERIT);
+            Process p = pb.start();
+            p.waitFor();
         }
     }
 
+    static PrintStream getOutStream(String file, boolean append) throws IOException {
+        if (file == null) return System.out;
+        File f = new File(file);
+        if (f.getParentFile() != null) f.getParentFile().mkdirs();
+        return new PrintStream(new FileOutputStream(f, append));
+    }
+
     static boolean isBuiltin(String cmd) {
-        return Set.of("echo", "exit", "type", "pwd", "cd").contains(cmd);
+        return Set.of("echo", "exit", "type", "pwd", "cd", "jobs").contains(cmd);
     }
 
     static String findInPath(String cmd) {
